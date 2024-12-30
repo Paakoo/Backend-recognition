@@ -19,10 +19,6 @@ import jwt
 
 
 
-
-
-
-
 # Load environment variables
 load_dotenv()
 
