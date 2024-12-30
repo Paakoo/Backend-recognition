@@ -1,7 +1,7 @@
 import h5py
 import numpy as np
 
-file_path = "model/ds_model_face.h5"
+file_path = "model/ds_model_faceQ.h5"
 output_txt_path = "output.txt"
 
 with h5py.File(file_path, "r") as h5_file:

@@ -1,21 +1,23 @@
 from flask import Flask
-from routes.face_recognition import face_recognition_bp, configure_jwt
+from routes.face_recognition import face_recognition_bp, configure_jwt, init_jwt
+from dotenv import load_dotenv
 import os
+from flask_cors import CORS
 
+load_dotenv()
+
+# Initialize Flask
 app = Flask(__name__)
 
-# Configure JWT
 configure_jwt(app)
-
-# Register Blueprints
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
+app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_CONTENT_LENGTH'))
+CORS(app) 
 app.register_blueprint(face_recognition_bp)
+init_jwt(app)
 
 if __name__ == '__main__':
-    # Ensure the JWT secret key is set
-    jwt_secret_key = os.getenv('JWT_SECRET_KEY')
-    if not jwt_secret_key:
-        raise ValueError("JWT_SECRET_KEY environment variable is not set")
-    else:
-        print(f"JWT_SECRET_KEY is set to: {jwt_secret_key}")
-    
-    app.run(debug=True)
+    host = os.getenv('FLASK_HOST')
+    port = int(os.getenv('FLASK_PORT'))
+    debug = os.getenv('DEBUG')
+    app.run(debug=debug, host=host, port=port)

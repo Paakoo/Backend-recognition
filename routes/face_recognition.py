@@ -42,6 +42,7 @@ FACE_DETECTION_MODEL = os.getenv('FACE_DETECTION_MODEL')
 FACE_RECOGNITION_MODEL = os.getenv('FACE_RECOGNITION_MODEL')
 FACE_IMAGE_SIZE = int(os.getenv('FACE_IMAGE_SIZE'))
 EMBEDDINGS_PATH = os.getenv('EMBEDDINGS_PATH')
+MODEL_FOLDER = os.getenv('MODEL_FOLDER')
 
 db_config = {
     "host": os.getenv("MYSQL_HOST", "localhost"),
@@ -112,7 +113,7 @@ def api_status():
 
 @face_recognition_bp.route('/capture')
 def capture():
-    return render_template('captureWajah.html')
+    return render_template('FaceCapture.html')
 
 def crop_and_save_face(image_data, output_path, filename):
     try:
@@ -182,11 +183,55 @@ def save_image_route():
     user_folder = os.path.join(BASE_FOLDER, username)
     os.makedirs(user_folder, exist_ok=True)
 
+    # Check if model exists
+    model_path = os.path.join(MODEL_FOLDER, 'ds_model_face.h5')
+    if not os.path.exists(model_path):
+        try:
+            # Create empty H5 file
+            with h5py.File(model_path, 'w') as hf:
+                print(f"Created new model file at {model_path}")
+        except Exception as e:
+            print(f"Error creating model file: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to create model file'
+            }), 500
+
     try:
         filename = f"{username}_{angle}_{count}.jpg"
         processed_filename = crop_and_save_face(image_data, user_folder, filename)
         
         if processed_filename:
+            # Count total images in user folder
+            total_images = len([f for f in os.listdir(user_folder) 
+                              if f.endswith(('.jpg', '.jpeg', '.png'))])
+            
+            # Update embeddings after saving new image
+            if total_images == 30:  # Check if folder has 30 images
+                try:
+                    embeddings = []
+                    for img in os.listdir(user_folder):
+                        if img.endswith(('.jpg', '.jpeg', '.png')):
+                            img_path = os.path.join(user_folder, img)
+                            embedding_obj = DeepFace.represent(
+                                img_path=img_path,
+                                model_name=FACE_RECOGNITION_MODEL,
+                                detector_backend=FACE_DETECTION_MODEL,
+                                enforce_detection=True,
+                                align=True
+                            )
+                            embedding_vector = np.array(embedding_obj[0]['embedding'])
+                            embeddings.append(embedding_vector)
+
+                    if embeddings:
+                        with h5py.File(model_path, 'a') as hf:
+                            if f"user_{username}" in hf:
+                                del hf[f"user_{username}"]  # Remove existing embeddings
+                            hf.create_dataset(f"user_{username}", data=np.array(embeddings))
+                except Exception as e:
+                    print(f"Error updating embeddings: {e}")
+                    # Continue anyway since the image was saved successfully
+
             return jsonify({
                 'status': 'success',
                 'message': f'Image saved as {processed_filename}',
@@ -204,8 +249,36 @@ def save_image_route():
             'status': 'error',
             'message': 'Error saving image'
         }), 500
-    
 
+@face_recognition_bp.route('/api/save_user', methods=['POST'])
+def save_user():
+    data = request.get_json()
+    username = data.get('username')
+    email = data.get('email')
+    role = data.get('role')
+    password = "123"
+
+    # Validasi data input
+    if not username or not email or not role:
+        return jsonify({'error': 'All fields are required'}), 400
+
+    try:
+        # Membuka koneksi ke database
+        connection = pymysql.connect(**db_config)
+        cursor = connection.cursor()
+
+        # Menyimpan data pengguna
+        sql = "INSERT INTO karyawan (nama, email, role, password) VALUES (%s, %s, %s, %s)"
+        cursor.execute(sql, (username, email, role, password))
+        connection.commit()
+
+        return jsonify({'message': 'User saved successfully','password': password}), 201
+    except pymysql.MySQLError as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if connection:
+            connection.close()
+            
 def get_incremental_filename(folder, filename):
     """Generate an incremental filename to avoid overwriting existing files."""
     name, ext = os.path.splitext(filename)
@@ -349,7 +422,9 @@ def upload():
                 
                 os.remove(temp_path)
                 total_time = time.time() - start_time
-
+                
+                print(matched_name)
+                print(current_user)
                 if matched_name:
                     # Connect to database to verify user
                     connection = pymysql.connect(**db_config)
@@ -358,12 +433,9 @@ def upload():
                         cursor.execute(sql, (current_user,))
                         user = cursor.fetchone()
 
-                        if not user:
-                            return jsonify({
-                                'status': 'error',
-                                'message': 'User not authenticated'
-                            }), 401
 
+                        print(matched_name)
+                        print(current_user)
                         if matched_name == current_user:
                             return jsonify({
                                 'status': 'success',
@@ -372,7 +444,9 @@ def upload():
                                     'matched_name': matched_name,
                                     'confidence': float(similarity),
                                     'filename': filename,
-                                    'is_real': is_real
+                                    'database_name': current_user,
+                                    'is_real': is_real,
+                                    'spoof_confidence': spoof_confidence
                                 },
                                 'timing': {
                                     'spoofing': f"{spoof_time:.3f}s",
@@ -387,9 +461,23 @@ def upload():
                             return jsonify({
                                 'status': 'error',
                                 'message': 'Face matched with different user',
-                                'matched_user': matched_name,
-                                'current_user': current_user
-                            }), 401
+                                'data': {
+                                    'matched_name': matched_name,
+                                    'confidence': float(similarity),
+                                    'filename': filename,
+                                    'database_name': current_user,
+                                    'is_real': is_real,
+                                    'spoof_confidence': spoof_confidence
+                                },
+                                'timing': {
+                                    'spoofing': f"{spoof_time:.3f}s",
+                                    'detection': f"{detection_time:.3f}s",
+                                    'processing': f"{process_time:.3f}s",
+                                    'embedding': f"{embedding_time:.3f}s",
+                                    'matching': f"{matching_time:.3f}s",
+                                    'total': f"{time.time() - start_time:.3f}s"
+                                }
+                            }), 200
 
                 return jsonify({
                     'status': 'error',
@@ -616,7 +704,7 @@ def login():
         try:
             with connection.cursor() as cursor:
                 cursor.execute("""
-                    SELECT id_karyawan, email, nama
+                    SELECT id_karyawan, email, nama, role
                     FROM karyawan 
                     WHERE email = %s AND password = %s
                 """, (email, password))
@@ -639,6 +727,7 @@ def login():
                             'nama': user['nama'],
                             'token': access_token,
                             'token_type': 'Bearer',
+                            'role': user['role'],
                             'expires_in': None  # Token does not expire
                         }
                     }
