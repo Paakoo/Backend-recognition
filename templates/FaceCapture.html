@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Capture Multiple Angles</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: left;
+            align-items: center;
+            min-height: 100vh;
+            flex-direction: column;
+        }
+
+        h1 {
+            color: #333;
+        }
+
+        label {
+            font-weight: bold;
+        }
+
+        input, select, button {
+            margin: 10px 0;
+            padding: 10px;
+            width: 100%;
+            max-width: 400px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+
+        button {
+            background-color: #007BFF;
+            color: white;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        button:hover:enabled {
+            background-color: #0056b3;
+        }
+
+        #loading {
+            font-size: 18px;
+            color: blue;
+            display: none;
+        }
+
+        form {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            width: 90%;
+            max-width: 1000px;
+        }
+
+        video {
+            margin: 20px 0;
+            border: 2px solid #007BFF;
+            border-radius: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+            text-align: left;
+            margin-left: 250px;
+        }
+
+        .buttons {
+            display: flex;
+            justify-content: space-around;
+        }
+    </style>
+</head>
+<body>
+    <form id="userForm">
+        <h1>Capture Faces </h1>
+
+        <div class="form-group">
+            <label for="username">Masukkan Nama:</label>
+            <input type="text" id="username" name="username" placeholder="Your Name">
+        </div>
+
+        <div class="form-group">
+            <label for="email">Masukkan Email:</label>
+            <input type="email" id="email" name="email" placeholder="Your Email">
+        </div>
+
+        <div class="form-group">
+            <label for="role">Pilih Role:</label>
+            
+            <select id="role" name="role">
+                <option value="user">User</option>
+                <option value="admin">Admin</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="cameras">Pilih Kamera:</label>
+            <select id="cameras"></select>
+        </div>
+
+        <video id="video" width="640" height="480" autoplay></video>
+
+        <div class="buttons">
+            <button type="button" id="captureFront">Wajah Depan</button>
+            <button type="button" id="captureLeft">Wajah bagian kiri </button>
+            <button type="button" id="captureRight">Wajah bagian kanan</button>
+        </div>
+
+        <p id="loading">Processing, please wait...</p>
+
+        <button type="button" id="submitUser">Submit User Data</button>
+    </form>
+
+    <script>
+        const video = document.getElementById('video');
+        const captureFront = document.getElementById('captureFront');
+        const captureLeft = document.getElementById('captureLeft');
+        const captureRight = document.getElementById('captureRight');
+        const usernameInput = document.getElementById('username');
+        const emailInput = document.getElementById('email');
+        const roleSelect = document.getElementById('role');
+        const camerasSelect = document.getElementById('cameras');
+        const loadingMessage = document.getElementById('loading');
+        const submitUser = document.getElementById('submitUser');
+
+        let currentStream = null;
+
+        const stopCurrentStream = () => {
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+        };
+
+        const startCamera = (deviceId) => {
+            stopCurrentStream();
+            navigator.mediaDevices.getUserMedia({
+                video: {
+                    deviceId: deviceId ? { exact: deviceId } : undefined
+                }
+            })
+            .then((stream) => {
+                currentStream = stream;
+                video.srcObject = stream;
+            })
+            .catch((err) => {
+                console.error("Error accessing camera: ", err);
+            });
+        };
+
+        navigator.mediaDevices.enumerateDevices()
+            .then((devices) => {
+                devices.forEach((device) => {
+                    if (device.kind === 'videoinput') {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId;
+                        option.text = device.label || `Camera ${camerasSelect.length + 1}`;
+                        camerasSelect.appendChild(option);
+                    }
+                });
+                startCamera(camerasSelect.value);
+            })
+            .catch((err) => {
+                console.error("Error enumerating devices: ", err);
+            });
+
+        camerasSelect.addEventListener('change', () => {
+            startCamera(camerasSelect.value);
+        });
+
+        const submitUserData = () => {
+            const username = usernameInput.value.trim();
+            const email = emailInput.value.trim();
+            const role = roleSelect.value;
+
+            if (!username || !email) {
+                alert("Please fill in all fields.");
+                return;
+            }
+
+            fetch('/save_user', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    username: username,
+                    email: email,
+                    role: role
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert("User data saved successfully!");
+                console.log(data);
+            })
+            .catch(error => {
+                console.error("Error saving user data:", error);
+            });
+        };
+
+        submitUser.addEventListener('click', submitUserData);
+
+        const captureImage = (angle, count) => {
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const context = canvas.getContext('2d');
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg');
+
+            const username = usernameInput.value.trim();
+            const email = emailInput.value.trim();
+            const role = roleSelect.value;
+
+            if (!username || !email) {
+                alert("Please enter all required fields.");
+                return;
+            }
+
+            return fetch('/api/save_image', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    image: dataUrl,
+                    angle: angle,
+                    count: count,
+                    username: username,
+                    email: email,
+                    role: role
+                }),
+            });
+        };
+
+        const processCapture = async (angle) => {
+            let button;
+            if (angle === 'front') {
+                button = captureFront;
+            } else if (angle === 'left') {
+                button = captureLeft;
+            } else if (angle === 'right') {
+                button = captureRight;
+            }
+
+            loadingMessage.style.display = 'block';
+            button.disabled = true;
+
+            for (let i = 0; i < 10; i++) {
+                await captureImage(angle, i + 1)
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log("Image saved:", data.message);
+                    })
+                    .catch(error => {
+                        console.error("Error saving image:", error);
+                    });
+
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+
+            button.disabled = false;
+            loadingMessage.style.display = 'none';
+        };
+
+        captureFront.addEventListener('click', () => {
+            processCapture('front');
+        });
+
+        captureLeft.addEventListener('click', () => {
+            processCapture('left');
+        });
+
+        captureRight.addEventListener('click', () => {
+            processCapture('right');
+        });
+    </script>
+</body>
+</html>
