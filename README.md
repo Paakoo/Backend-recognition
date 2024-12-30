@@ -1,4 +1,4 @@
-1. Jalankan pip install requirements.txt
+1. Jalankan pip install requirement.txt
 2. Di bagian .env ganti FLASK_HOST dan FLASK_PORT(jika diperlukan), untuk sekarang saya masih menggunakan lokalhost yaitu 127.0.0.1
 3. Kemudian start server dengan py main.py
 4. Untuk database saya menggunakan mysql
