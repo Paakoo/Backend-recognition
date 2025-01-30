@@ -23,7 +23,7 @@
         label {
             font-weight: bold;
         }
-
+        
         input, select, button {
             margin: 10px 0;
             padding: 10px;
@@ -80,6 +80,12 @@
             display: flex;
             justify-content: space-around;
         }
+
+        #cameraStatus {
+            color: #666;
+            font-size: 14px;
+            margin: 5px 0;
+        }
     </style>
 </head>
 <body>
@@ -98,7 +104,6 @@
 
         <div class="form-group">
             <label for="role">Pilih Role:</label>
-            
             <select id="role" name="role">
                 <option value="user">User</option>
                 <option value="admin">Admin</option>
@@ -108,9 +113,10 @@
         <div class="form-group">
             <label for="cameras">Pilih Kamera:</label>
             <select id="cameras"></select>
+            <div id="cameraStatus"></div>
         </div>
 
-        <video id="video" width="640" height="480" autoplay></video>
+        <video id="video" width="640" height="480" autoplay playsinline></video>
 
         <div class="buttons">
             <button type="button" id="captureFront">Wajah Depan</button>
@@ -134,52 +140,138 @@
         const camerasSelect = document.getElementById('cameras');
         const loadingMessage = document.getElementById('loading');
         const submitUser = document.getElementById('submitUser');
+        const cameraStatus = document.getElementById('cameraStatus');
 
         let currentStream = null;
+        let lastDeviceId = null;
+        let isProcessing = false;
 
-        const stopCurrentStream = () => {
-            if (currentStream) {
-                currentStream.getTracks().forEach(track => track.stop());
+        async function initializeCameras() {
+            try {
+                cameraStatus.textContent = "Requesting camera permission...";
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                
+                await updateCameraList();
+                
+                navigator.mediaDevices.addEventListener('devicechange', async () => {
+                    cameraStatus.textContent = "Detected device change, updating...";
+                    await updateCameraList();
+                });
+                
+                cameraStatus.textContent = "Camera initialized successfully";
+            } catch (err) {
+                console.error("Error initializing cameras:", err);
+                cameraStatus.textContent = "Error initializing camera: " + err.message;
             }
-        };
+        }
 
-        const startCamera = (deviceId) => {
-            stopCurrentStream();
-            navigator.mediaDevices.getUserMedia({
-                video: {
-                    deviceId: deviceId ? { exact: deviceId } : undefined
+        async function updateCameraList() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                
+                const currentSelectedValue = camerasSelect.value;
+                camerasSelect.innerHTML = '';
+                
+                videoDevices.forEach((device) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `Camera ${camerasSelect.length + 1}`;
+                    camerasSelect.appendChild(option);
+                });
+
+                if (videoDevices.some(device => device.deviceId === currentSelectedValue)) {
+                    camerasSelect.value = currentSelectedValue;
+                } else if (videoDevices.length > 0) {
+                    camerasSelect.value = videoDevices[0].deviceId;
                 }
-            })
-            .then((stream) => {
+
+                await startCamera(camerasSelect.value);
+                cameraStatus.textContent = `Found ${videoDevices.length} camera(s)`;
+            } catch (err) {
+                console.error("Error updating camera list:", err);
+                cameraStatus.textContent = "Error updating camera list: " + err.message;
+            }
+        }
+
+        // function stopCurrentStream(stream = currentStream) {
+        //     if (stream) {
+        //         stream.getTracks().forEach(track => {
+        //             track.stop();
+        //         });
+        //     }
+        //     if (video.srcObject) {
+        //         const tracks = video.srcObject.getTracks();
+        //         tracks.forEach(track => track.stop());
+        //         video.srcObject = null;
+        //     }
+        // }
+
+        async function startCamera(deviceId) {
+            try {
+                // stopCurrentStream();
+                
+                const constraints = {
+                    video: {
+                        deviceId: deviceId ? { exact: deviceId } : undefined,
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        frameRate: { ideal: 30 }
+                    }
+                };
+
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 currentStream = stream;
                 video.srcObject = stream;
-            })
-            .catch((err) => {
-                console.error("Error accessing camera: ", err);
-            });
-        };
+                lastDeviceId = deviceId;
 
-        navigator.mediaDevices.enumerateDevices()
-            .then((devices) => {
-                devices.forEach((device) => {
-                    if (device.kind === 'videoinput') {
-                        const option = document.createElement('option');
-                        option.value = device.deviceId;
-                        option.text = device.label || `Camera ${camerasSelect.length + 1}`;
-                        camerasSelect.appendChild(option);
-                    }
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        video.play().then(resolve);
+                        cameraStatus.textContent = "Camera started successfully";
+                    };
                 });
-                startCamera(camerasSelect.value);
-            })
-            .catch((err) => {
-                console.error("Error enumerating devices: ", err);
-            });
+            } catch (err) {
+                console.error("Error starting camera:", err);
+                cameraStatus.textContent = "Error starting camera: " + err.message;
+                if (deviceId && deviceId !== '') {
+                    console.log("Trying fallback to default camera");
+                    return startCamera('');
+                }
+            }
+        }
 
-        camerasSelect.addEventListener('change', () => {
-            startCamera(camerasSelect.value);
+        camerasSelect.addEventListener('change', async () => {
+            cameraStatus.textContent = "Switching camera...";
+            await startCamera(camerasSelect.value);
+        });
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeCameras();
+        });
+
+        video.addEventListener('error', (e) => {
+            console.error("Video error:", e);
+            cameraStatus.textContent = "Video error occurred, attempting to recover...";
+            if (lastDeviceId) {
+                startCamera(lastDeviceId);
+            }
+        });
+
+        document.addEventListener('visibilitychange', async () => {
+            if (document.visibilityState === 'visible') {
+                if (lastDeviceId) {
+                    cameraStatus.textContent = "Tab visible, restarting camera...";
+                    await startCamera(lastDeviceId);
+                }
+            } else {
+                // stopCurrentStream();
+            }
         });
 
         const submitUserData = () => {
+            if (isProcessing) return;
+            
             const username = usernameInput.value.trim();
             const email = emailInput.value.trim();
             const role = roleSelect.value;
@@ -188,6 +280,9 @@
                 alert("Please fill in all fields.");
                 return;
             }
+
+            isProcessing = true;
+            loadingMessage.style.display = 'block';
 
             fetch('/api/save_user', {
                 method: 'POST',
@@ -207,6 +302,11 @@
             })
             .catch(error => {
                 console.error("Error saving user data:", error);
+                alert("Error saving user data");
+            })
+            .finally(() => {
+                isProcessing = false;
+                loadingMessage.style.display = 'none';
             });
         };
 
@@ -226,7 +326,7 @@
 
             if (!username || !email) {
                 alert("Please enter all required fields.");
-                return;
+                return Promise.reject("Missing required fields");
             }
 
             return fetch('/api/save_image', {
@@ -246,46 +346,46 @@
         };
 
         const processCapture = async (angle) => {
+            if (isProcessing) return;
+            
             let button;
-            if (angle === 'front') {
-                button = captureFront;
-            } else if (angle === 'left') {
-                button = captureLeft;
-            } else if (angle === 'right') {
-                button = captureRight;
-            }
+            if (angle === 'front') button = captureFront;
+            else if (angle === 'left') button = captureLeft;
+            else if (angle === 'right') button = captureRight;
 
+            isProcessing = true;
             loadingMessage.style.display = 'block';
             button.disabled = true;
 
-            for (let i = 0; i < 10; i++) {
-                await captureImage(angle, i + 1)
-                    .then(response => response.json())
-                    .then(data => {
-                        console.log("Image saved:", data.message);
-                    })
-                    .catch(error => {
-                        console.error("Error saving image:", error);
-                    });
+            try {
+                for (let i = 0; i < 10; i++) {
+                    await captureImage(angle, i + 1)
+                        .then(response => response.json())
+                        .then(data => {
+                            console.log("Image saved:", data.message);
+                            cameraStatus.textContent = `Captured image ${i + 1}/10 for ${angle} angle`;
+                        })
+                        .catch(error => {
+                            console.error("Error saving image:", error);
+                            throw error;
+                        });
 
-                await new Promise(resolve => setTimeout(resolve, 500));
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+                cameraStatus.textContent = `Completed capturing ${angle} angle images`;
+            } catch (error) {
+                alert("Error during capture process");
+                cameraStatus.textContent = "Error during capture process";
+            } finally {
+                button.disabled = false;
+                loadingMessage.style.display = 'none';
+                isProcessing = false;
             }
-
-            button.disabled = false;
-            loadingMessage.style.display = 'none';
         };
 
-        captureFront.addEventListener('click', () => {
-            processCapture('front');
-        });
-
-        captureLeft.addEventListener('click', () => {
-            processCapture('left');
-        });
-
-        captureRight.addEventListener('click', () => {
-            processCapture('right');
-        });
+        captureFront.addEventListener('click', () => processCapture('front'));
+        captureLeft.addEventListener('click', () => processCapture('left'));
+        captureRight.addEventListener('click', () => processCapture('right'));
     </script>
 </body>
 </html>
