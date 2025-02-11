@@ -1,5 +1,5 @@
 from flask import Flask
-from routes.face_recognition import face_recognition_bp, configure_jwt, init_jwt
+from routes.api_route import face_recognition_bp, configure_jwt, init_jwt
 from dotenv import load_dotenv
 import os
 from flask_cors import CORS
