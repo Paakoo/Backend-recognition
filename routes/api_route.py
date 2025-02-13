@@ -10,15 +10,14 @@ import h5py
 import time
 import base64
 from scipy.spatial.distance import cosine
-import pymysql
+import psycopg2
+from psycopg2.extras import DictCursor
 from datetime import datetime, timedelta
 import json
 from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, jwt_required, get_jwt_identity, get_jwt
 from functools import wraps
 import jwt
 from retinaface import RetinaFace
-
-
 
 # Load environment variables
 load_dotenv()
@@ -42,13 +41,21 @@ EMBEDDINGS_PATH = os.getenv('EMBEDDINGS_PATH')
 MODEL_FOLDER = os.getenv('MODEL_FOLDER')
 
 db_config = {
-    "host": os.getenv("MYSQL_HOST", "localhost"),
-    "user": os.getenv("MYSQL_USER", "root"),
-    "password": os.getenv("MYSQL_PASSWORD", "pass"),
-    "database": os.getenv("MYSQL_DB", "tugas_akhir"),
-    "cursorclass": pymysql.cursors.DictCursor
+    "host": os.getenv("POSTGRES_HOST"),
+    "user": os.getenv("POSTGRES_USER"),
+    "password": os.getenv("POSTGRES_PASSWORD"),
+    "database": os.getenv("POSTGRES_DB"),
+    "port": os.getenv("POSTGRES_PORT")
 }
 
+def get_db_connection():
+    try:
+        connection = psycopg2.connect(**db_config)
+        return connection
+    except Exception as e:
+        print(f"Error connecting to database: {e}")
+        return None
+    
 def load_h5_embeddings():
     try:
         embeddings = {}
@@ -107,10 +114,6 @@ def configure_jwt(app):
 @api_route_bp.route('/api/status', methods=['GET'])
 def api_status():
     return jsonify({'status': 'API is running'})
-
-@api_route_bp.route('/capture')
-def capture():
-    return render_template('FaceCapture.html')
 
 def crop_and_save_face(image_data, output_path, filename):
     try:
@@ -219,31 +222,31 @@ def save_image_route():
 @api_route_bp.route('/api/save_user', methods=['POST'])
 def save_user():
     data = request.get_json()
-    username = data.get('username')
+    print("Received data:", data)
+    username = data.get('name')
     email = data.get('email')
     role = data.get('role')
     password = "123"
 
-    # Validasi data input
     if not username or not email or not role:
         return jsonify({'error': 'All fields are required'}), 400
 
     try:
-        # Membuka koneksi ke database
-        connection = pymysql.connect(**db_config)
-        cursor = connection.cursor()
-
-        # Menyimpan data pengguna
-        sql = "INSERT INTO karyawan (nama, email, role, password) VALUES (%s, %s, %s, %s)"
-        cursor.execute(sql, (username, email, role, password))
-        connection.commit()
-
-        return jsonify({'message': 'User saved successfully','password': password}), 201
-    except pymysql.MySQLError as e:
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            sql = """
+                INSERT INTO karyawan (nama, email, role, password) 
+                VALUES (%s, %s, %s, %s)
+                RETURNING id_karyawan
+            """
+            cursor.execute(sql, (username, email, role, password))
+            connection.commit()
+            
+        return jsonify({'message': 'User saved successfully', 'password': password}), 201
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
-        if connection:
-            connection.close()
+        connection.close()
             
 def get_incremental_filename(folder, filename):
     """Generate an incremental filename to avoid overwriting existing files."""
@@ -409,13 +412,13 @@ def upload():
 
         # Database verification
         try:
-            connection = pymysql.connect(**db_config)
-            with connection.cursor() as cursor:
+            connection = get_db_connection()
+            with connection.cursor(cursor_factory=DictCursor) as cursor:
                 sql = "SELECT id_karyawan FROM karyawan WHERE id_karyawan = %s"
                 cursor.execute(sql, (current_user,))
                 user = cursor.fetchone()
         finally:
-            if 'connection' in locals():
+            if connection:
                 connection.close()
 
         # Prepare response
@@ -536,102 +539,7 @@ def update_dataset():
             'status': 'error',
             'message': str(e),
             'time_taken': f"{time.time() - start_time:.3f}s"
-        }), 500
-        
-@api_route_bp.route('/api/spoof', methods=['POST'])        
-def check_spoofing():
-    start_time = time.time()
-    
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file part'}), 400
-        
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-        
-    if file and allowed_file(file.filename):
-        try:
-            # Generate filename and save temp file
-            filename = secure_filename(file.filename)
-            filename = get_incremental_filename(UPLOAD_FOLDER, filename)
-            file_path = os.path.join(UPLOAD_FOLDER, filename)
-            temp_path = os.path.join(UPLOAD_FOLDER, f"temp_spoof_{filename}")
-            file.save(temp_path)
-
-            # Extract faces with anti-spoofing
-            result = DeepFace.extract_faces(
-                img_path=temp_path,
-                anti_spoofing=True
-            )
-            
-            spoof_time = time.time() - start_time
-            
-            # Clean up temp file
-            os.remove(temp_path)
-            
-            if result and len(result) > 0:
-                face_data = result[0]
-                return jsonify({
-                    'status': 'success',
-                    'filename': filename,
-                    'anti_spoofing': {
-                        'is_real': face_data.get('is_real', False),
-                        'confidence': float(face_data.get('confidence', 0)),
-                        'result': 'Real' if face_data.get('is_real', False) else 'Fake'
-                    },
-                    'face_detection': {
-                        'found': True,
-                        'confidence': float(face_data.get('confidence', 0)),
-                        'facial_area': face_data.get('facial_area', {})
-                    },
-                    'timings': {
-                        'process_time': f"{spoof_time:.3f}s"
-                    }
-                })
-            else:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'No face detected or spoofing check failed'
-                }), 400
-
-        except Exception as e:
-            return jsonify({
-                'status': 'error',
-                'message': str(e)
-            }), 500
-            
-@api_route_bp.route('/api/check_db_connection', methods=['GET'])
-def check_db_connection():
-    print("Database Configuration:")
-    print("Host:", db_config["host"])
-    print("User:", db_config["user"])
-    print("Password:", db_config["password"])
-    print("Database:", db_config["database"])
-
-    try:
-        # Periksa apakah konfigurasi tersedia
-        if not all(db_config.values()):
-            raise ValueError("Database configuration is incomplete. Check environment variables.")
-
-        # Membuka koneksi ke database
-        connection = pymysql.connect(
-            host=db_config["host"],
-            user=db_config["user"],
-            password=db_config["password"],
-            database=db_config["database"]
-        )
-        
-        return jsonify({"status": "success", "message": "Database connected successfully!"}), 200
-    except ValueError as ve:
-        return jsonify({"status": "error", "message": str(ve)}), 400
-    except pymysql.MySQLError as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        try:
-            if connection:
-                connection.close()
-        except NameError:
-            pass
+        }), 500 
 
 @api_route_bp.route('/api/login', methods=['POST'])
 def login():
@@ -640,22 +548,18 @@ def login():
         print("\n=== Login Request ===")
         print(f"Time: {datetime.now()}")
         print("Request data:", json.dumps(data, indent=2))
-        
         email = data.get('email')
         password = data.get('password')
         
         if not email or not password:
-            response = {
+            return jsonify({
                 'status': 'error',
                 'message': 'Email and password are required'
-            }
-            print("\n=== Login Response ===")
-            print(json.dumps(response, indent=2))
-            return jsonify(response), 400
+            }), 400
             
-        connection = pymysql.connect(**db_config)
+        connection = get_db_connection()
         try:
-            with connection.cursor() as cursor:
+            with connection.cursor(cursor_factory=DictCursor) as cursor:
                 cursor.execute("""
                     SELECT id_karyawan, email, nama, role
                     FROM karyawan 
@@ -668,9 +572,7 @@ def login():
                     access_token = create_access_token(
                         identity=user['nama'],
                         expires_delta=False
-                        # Token will never expire
                     )
-                    
                     response = {
                         'status': 'success',
                         'message': 'Login successful',
@@ -688,73 +590,25 @@ def login():
                     print(json.dumps(response, indent=2))
                     return jsonify(response), 200
                 else:
-                    response = {
+                    return jsonify({
                         'status': 'error',
                         'message': 'Invalid email or password'
-                    }
-                    print("\n=== Login Response ===")
-                    print(json.dumps(response, indent=2))
-                    return jsonify(response), 401
-                    
+                    }), 401
         finally:
-            connection.close()
-            
-    except Exception as e:
-        response = {
-            'status': 'error',
-            'message': str(e)
-        }
-        print("\n=== Login Error ===")
-        print(json.dumps(response, indent=2))
-        return jsonify(response), 500
-
-@api_route_bp.route('/protected', methods=['GET'])
-@jwt_required()
-def protected():
-    current_user = get_jwt_identity()
-    return jsonify(logged_in_as=current_user), 200
-
-
-@api_route_bp.route('/api/getoffice', methods=['GET'])
-def get_offices():
-    try:
-        connection = pymysql.connect(**db_config)
-        with connection.cursor() as cursor:
-            sql = "SELECT id_lokasi, nama_lokasi, latitude, longitude FROM lokasi"
-            cursor.execute(sql)
-            offices = cursor.fetchall()
-    
-            print(sql)
-            # Format decimal values for JSON
-            for office in offices:
-                office['latitude'] = float(office['latitude'])
-                office['longitude'] = float(office['longitude'])
-            
-            cursor.close()
-            connection.close()
-
-            return jsonify({
-                'status': 'success',
-                'message': 'Office data retrieved successfully',
-                'daftar_kantor': offices
-            }), 200
-
+            connection.close()        
     except Exception as e:
         return jsonify({
             'status': 'error',
-            'message': f'Failed to get office data: {str(e)}'
+            'message': str(e)
         }), 500
             
 @api_route_bp.route('/api/presence', methods=['POST'])
 def save_presence():
     try:
         json_data = request.get_json()
-        
-        # Extract required data
         location_data = json_data.get('location', {})
         data = json_data.get('data', {})
         
-        # Get values
         timestamp = location_data.get('timestamp')
         latitude = location_data.get('latitude')
         longitude = location_data.get('longitude')
@@ -762,51 +616,45 @@ def save_presence():
         location_type = location_data.get('location_type')
         database_name = data.get('database_name')
         
-        # Connect to database
-        connection = pymysql.connect(**db_config)
-        cursor = connection.cursor()
-        
-        # Insert presence record
-        sql = """
-            INSERT INTO absensi 
-            (id_karyawan, nama, work_type, office, latitude, longitude, waktu_absensi) 
-            VALUES 
-            (
-                (SELECT id_karyawan FROM karyawan WHERE nama = %s), 
-                %s, %s, %s, %s, %s, %s
-            )
-        """
-        
-        cursor.execute(sql, (
-            database_name,  # nama untuk subquery
-            database_name,  # nama karyawan
-            location_type,  # Gunakan default atau sesuaikan
-            office_name,
-            latitude,
-            longitude,
-            timestamp
-        ))
-        
-        connection.commit()
-        
+        connection = get_db_connection()
+        with connection.cursor() as cursor:
+            sql = """
+                INSERT INTO absensi 
+                (id_karyawan, nama, work_type, office, latitude, longitude, absensi_masuk) 
+                VALUES (
+                    (SELECT id_karyawan FROM karyawan WHERE nama = %s), 
+                    %s, %s, %s, %s, %s, %s
+                )
+            """
+            
+            cursor.execute(sql, (
+                database_name,
+                database_name,
+                location_type,
+                office_name,
+                latitude,
+                longitude,
+                timestamp
+            ))
+            
+            connection.commit()
+            
         return jsonify({
             'status': 'success',
             'message': 'Presence recorded successfully'
         }), 201
         
-    except pymysql.MySQLError as e:
-        print("General Error:", str(e))
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
-        if 'connection' in locals() and connection:
+        if connection:
             connection.close()
 
 @api_route_bp.route('/api/presencecheck', methods=['GET'])
 def check_presence():
     try:
-        # Ambil parameter dari request
-        user_name = request.args.get('nama')  # Nama user (misalnya: "Bagus Kedua")
-        user_id = request.args.get('id_karyawan')     # ID karyawan (opsional)
+        user_name = request.args.get('nama')
+        user_id = request.args.get('id_karyawan')
 
         if not user_name and not user_id:
             return jsonify({
@@ -814,33 +662,29 @@ def check_presence():
                 'message': 'Parameter "name" atau "id" diperlukan untuk memeriksa presensi.'
             }), 400
 
-        # Buat koneksi ke database
-        connection = pymysql.connect(**db_config)
-        cursor = connection.cursor(pymysql.cursors.DictCursor)
+        connection = get_db_connection()
+        cursor = connection.cursor(cursor_factory=DictCursor)
 
-        # Query untuk memeriksa data presensi
         if user_id:
             sql = """
                 SELECT * FROM absensi 
-                WHERE id_karyawan = %s AND DATE(waktu_absensi) = CURDATE()
+                WHERE id_karyawan = %s AND DATE(absensi_masuk) = CURRENT_DATE
             """
             cursor.execute(sql, (user_id,))
         else:
             sql = """
                 SELECT * FROM absensi 
-                WHERE nama = %s AND DATE(waktu_absensi) = CURDATE()
+                WHERE nama = %s AND DATE(absensi_masuk) = CURRENT_DATE
             """
             cursor.execute(sql, (user_name,))
 
-        # Ambil hasil query
         result = cursor.fetchone()
 
-        # Cek apakah presensi ditemukan
         if result:
             return jsonify({
                 'status': 'success',
                 'message': 'User telah melakukan presensi hari ini.',
-                'data': result
+                'data': dict(result)
             }), 200
         else:
             return jsonify({
@@ -848,15 +692,16 @@ def check_presence():
                 'message': 'User belum melakukan presensi hari ini.'
             }), 404
 
-    except pymysql.MySQLError as e:
+    except psycopg2.Error as e:
         return jsonify({
             'status': 'error',
             'message': str(e)
         }), 500
     finally:
-        if 'connection' in locals() and connection:
+        if cursor:
+            cursor.close()
+        if connection:
             connection.close()
-
 
 @api_route_bp.route('/api/history', methods=['GET'])
 def history():
@@ -869,40 +714,39 @@ def history():
                 'message': 'Parameter "nama" diperlukan untuk melihat history.'
             }), 400
 
-        connection = pymysql.connect(**db_config)
-        cursor = connection.cursor(pymysql.cursors.DictCursor)
+        connection = get_db_connection()
+        with connection.cursor(cursor_factory=DictCursor) as cursor:
+            sql = """
+                SELECT 
+                    TO_CHAR(absensi_masuk, 'YYYY-MM-DD') as tanggal,
+                    TO_CHAR(absensi_masuk, 'HH24:MI:SS') as jam,
+                    nama,
+                    work_type
+                FROM absensi 
+                WHERE nama = %s
+                ORDER BY absensi_masuk DESC
+            """
+            
+            cursor.execute(sql, (user_name,))
+            records = cursor.fetchall()
 
-        sql = """
-            SELECT 
-                DATE_FORMAT(waktu_absensi, '%%Y-%%m-%%d') as tanggal,
-                DATE_FORMAT(waktu_absensi, '%%H:%%i:%%s') as jam,
-                nama,
-                work_type
-            FROM absensi 
-            WHERE nama = %s
-            ORDER BY waktu_absensi DESC
-        """
-        
-        cursor.execute(sql, (user_name,))
-        records = cursor.fetchall()
+            if not records:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Data absensi tidak ditemukan'
+                }), 404
 
-        if not records:
+            absensi_data = [{
+                'tanggal': record['tanggal'],
+                'jam': record['jam'],
+                'nama': record['nama'],
+                'work_type': record['work_type']
+            } for record in records]
+
             return jsonify({
-                'status': 'error',
-                'message': 'Data absensi tidak ditemukan'
-            }), 404
-
-        absensi_data = [{
-            'tanggal': record['tanggal'],
-            'jam': record['jam'],
-            'nama': record['nama'],
-            'work_type': record['work_type']
-        } for record in records]
-
-        return jsonify({
-            'status': 'success',
-            'data': absensi_data
-        }), 200
+                'status': 'success',
+                'data': absensi_data
+            }), 200
 
     except Exception as e:
         return jsonify({
@@ -910,163 +754,5 @@ def history():
             'message': str(e)
         }), 500
     finally:
-        if 'connection' in locals() and connection:
-            cursor.close()
+        if connection:
             connection.close()
-            
-            
-@api_route_bp.route('/twins', methods=['POST'])
-def twins():
-    start_time = time.time()
-    try:
-        # Handle file upload
-        if 'file' not in request.files:
-            return jsonify({
-                'status': 'error',
-                'message': 'No image file provided'
-            }), 400
-            
-        file = request.files['file']
-        if not file or file.filename == '':
-            return jsonify({
-                'status': 'error',
-                'message': 'Empty file'
-            }), 400
-            
-        if not allowed_file(file.filename):
-            return jsonify({
-                'status': 'error',
-                'message': 'Invalid file type'
-            }), 400
-            
-        # Save and process file
-        filename = secure_filename(file.filename)
-        temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{filename}")
-        file.save(temp_path)
-        
-        # Process image
-        try:
-            # Anti-spoofing check first
-            spoof_start = time.time()
-            spoof_result = DeepFace.extract_faces(
-                img_path=temp_path,
-                anti_spoofing=True
-            )
-            spoof_time = time.time() - spoof_start
-
-            if not spoof_result or len(spoof_result) == 0:
-                os.remove(temp_path)
-                return jsonify({'error': 'No face detected'}), 400
-
-            face_data = spoof_result[0]
-            is_real = face_data.get('is_real', False)
-            spoof_confidence = float(face_data.get('confidence', 0))
-
-            # Continue with face detection if real face
-            detection_start = time.time()
-            image = cv2.imread(temp_path)
-            detector = MTCNN()
-            faces = detector.detect_faces(image)
-            detection_time = time.time() - detection_start
-
-            if faces:
-                # Time face processing
-                process_start = time.time()
-                x, y, width, height = faces[0]['box']
-                margin = 20
-                x = max(x - margin, 0)
-                y = max(y - margin, 0)
-                width += margin * 2
-                height += margin * 2
-                
-                cropped_face = image[y:y+height, x:x+width]
-                resized_face = cv2.resize(cropped_face, (250, 250))
-                file_path = os.path.join(UPLOAD_FOLDER, filename)
-                cv2.imwrite(file_path, resized_face)
-                process_time = time.time() - process_start
-
-                # Continue with embedding generation and matching...
-                embedding_start = time.time()
-                embedding_obj = DeepFace.represent(
-                    img_path=file_path,
-                    model_name=FACE_RECOGNITION_MODEL,
-                    detector_backend=FACE_DETECTION_MODEL,
-                    enforce_detection=False,
-                    align=True
-                )
-                embedding_time = time.time() - embedding_start
-
-                # Time matching
-                matching_start = time.time()
-                embeddings = load_h5_embeddings()
-                current_embedding = np.array(embedding_obj[0]['embedding'])
-                
-                matched_name, similarity = find_matching_face(current_embedding, embeddings)
-                matching_time = time.time() - matching_start
-                
-                os.remove(temp_path)
-                total_time = time.time() - start_time
-                
-                if matched_name:
-                    return jsonify({
-                        'status': 'success',
-                        'message': 'Face matched with authenticated user',
-                        'data': {
-                            'matched_name': matched_name,
-                            'confidence': float(similarity),
-                            'filename': filename,
-                            'is_real': is_real,
-                            'spoof_confidence': spoof_confidence
-                        },
-                        'timing': {
-                            'spoofing': f"{spoof_time:.3f}s",
-                            'detection': f"{detection_time:.3f}s",
-                            'processing': f"{process_time:.3f}s",
-                            'embedding': f"{embedding_time:.3f}s",
-                            'matching': f"{matching_time:.3f}s",
-                            'total': f"{time.time() - start_time:.3f}s"
-                        }
-                    }), 200
-                else:
-                    return jsonify({
-                        'status': 'error',
-                        'message': 'Face matched with different user',
-                        'data': {
-                            'matched_name': matched_name,
-                            'confidence': float(similarity),
-                            'filename': filename,
-                            'database_name': current_user,
-                            'is_real': is_real,
-                            'spoof_confidence': spoof_confidence
-                        },
-                        'timing': {
-                            'spoofing': f"{spoof_time:.3f}s",
-                            'detection': f"{detection_time:.3f}s",
-                            'processing': f"{process_time:.3f}s",
-                            'embedding': f"{embedding_time:.3f}s",
-                            'matching': f"{matching_time:.3f}s",
-                            'total': f"{time.time() - start_time:.3f}s"
-                        }
-                    }), 200
-
-            return jsonify({
-                'status': 'error',
-                'message': 'No face match found'
-            }), 404
-
-        except Exception as e:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            raise e
-
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
-    finally:
-        # Clean up temp files
-        if 'temp_path' in locals() and os.path.exists(temp_path):
-            os.remove(temp_path)
-
-    return jsonify({'error': 'Invalid file type'}), 400
